@@ -98,7 +98,13 @@ class KalmanNetNN(torch.nn.Module):
     ### Initialize Kalman Gain Network ###
     ######################################
     def InitKGainNet(self, prior_Q, prior_Sigma, prior_S, args):
-
+        """
+                初始化 Kalman 增益网络，使用多个 GRU 和全连接网络对 Kalman 滤波过程中的关键变量进行建模。
+                参数：
+                - prior_Q：预测误差协方差的先验值。
+                - prior_Sigma：状态协方差的先验值。
+                - prior_S：观测预测误差协方差的先验值。
+        """
         self.seq_len_input = 1 # KNet calculates time-step by time-step
 
         self.prior_Q = prior_Q.to(self.device)
@@ -107,17 +113,17 @@ class KalmanNetNN(torch.nn.Module):
 
         self.m = 4
 
-        # GRU to track Q
-        self.d_input_Q = self.m * args.in_mult_KNet
-        self.d_hidden_Q = self.m ** 2
+        # GRU to track Q 预测误差协方差 Q
+        self.d_input_Q = self.m * args.in_mult_KNet  # 输入维度，通常是 m 的扩展维度
+        self.d_hidden_Q = self.m ** 2  # 隐藏层维度，对应于协方差矩阵的形状
         self.GRU_Q = nn.GRU(self.d_input_Q, self.d_hidden_Q).to(self.device)
 
-        # GRU to track Sigma
+        # GRU to track Sigma 状态协方差 Sigma
         self.d_input_Sigma = self.d_hidden_Q + self.m * args.in_mult_KNet
         self.d_hidden_Sigma = self.m ** 2
         self.GRU_Sigma = nn.GRU(self.d_input_Sigma, self.d_hidden_Sigma).to(self.device)
        
-        # GRU to track S 
+        # GRU to track S 观测误差协方差 S
         self.d_input_S = self.n ** 2 + 2 * (self.n * 2) * args.in_mult_KNet
         self.d_hidden_S = (2 * self.n) ** 2
         self.GRU_S = nn.GRU(self.d_input_S, self.d_hidden_S).to(self.device)
@@ -129,7 +135,7 @@ class KalmanNetNN(torch.nn.Module):
                 nn.Linear(self.d_input_FC1, self.d_output_FC1),
                 nn.ReLU()).to(self.device)
 
-        # Fully connected 2         36                16
+        # Fully connected 2         36                16    对 S 和 Sigma 的输出进行结合
         self.d_input_FC2 = self.d_hidden_S + self.d_hidden_Sigma
         self.d_output_FC2 = 2 * self.n * self.m  
         self.d_hidden_FC2 = self.d_input_FC2 * args.out_mult_KNet
@@ -138,35 +144,35 @@ class KalmanNetNN(torch.nn.Module):
                 nn.ReLU(),
                 nn.Linear(self.d_hidden_FC2, self.d_output_FC2)).to(self.device)
 
-        # Fully connected 3
+        # Fully connected 3  生成状态协方差矩阵
         self.d_input_FC3 = self.d_hidden_S + self.d_output_FC2
         self.d_output_FC3 = self.m ** 2
         self.FC3 = nn.Sequential(
                 nn.Linear(self.d_input_FC3, self.d_output_FC3),
                 nn.ReLU()).to(self.device)
 
-        # Fully connected 4
+        # Fully connected 4 对状态协方差矩阵进行更新
         self.d_input_FC4 = self.d_hidden_Sigma + self.d_output_FC3
         self.d_output_FC4 = self.d_hidden_Sigma
         self.FC4 = nn.Sequential(
                 nn.Linear(self.d_input_FC4, self.d_output_FC4),
                 nn.ReLU()).to(self.device)
         
-        # Fully connected 5
+        # Fully connected 5 扩展 Kalman 滤波中的状态维度
         self.d_input_FC5 = self.m
         self.d_output_FC5 = self.m * args.in_mult_KNet
         self.FC5 = nn.Sequential(
                 nn.Linear(self.d_input_FC5, self.d_output_FC5),
                 nn.ReLU()).to(self.device)
 
-        # Fully connected 6
+        # Fully connected 6 对观测维度进行扩展
         self.d_input_FC6 = self.m
         self.d_output_FC6 = self.m * args.in_mult_KNet
         self.FC6 = nn.Sequential(
                 nn.Linear(self.d_input_FC6, self.d_output_FC6),
                 nn.ReLU()).to(self.device)
-        
-        # Fully connected 7
+
+        # Fully connected 7 扩展观测误差协方差矩阵
         self.d_input_FC7 = 2 * (self.n * 2)
         self.d_output_FC7 = 2 * (self.n * 2) * args.in_mult_KNet
         self.FC7 = nn.Sequential(
@@ -222,10 +228,12 @@ class KalmanNetNN(torch.nn.Module):
         dt = 7.0/2000.0
         dm = 0
 
-        # Predict the 1-st moment of x (单个数值）x(t|t-1) [N_T, 3]
+        # 预测状态的第一阶矩（均值）x(t|t-1)，基于当前后验状态和输入的角速度
+        # self.f 是状态演化函数
         self.m1x_prior = self.f(self.m1x_posterior, train_input_gyr, dt)
 
-        # Predict the 1-st moment of y（单个数值）y(t|t-1) [N_T, 6]
+        # 预测观测的第一阶矩（均值）y(t|t-1)，基于预测状态
+        # self.h 是观测函数
         self.y_previous = self.h(self.m1x_prior, dm)
 
 
@@ -234,28 +242,28 @@ class KalmanNetNN(torch.nn.Module):
     ##############################
     def step_KGain_est(self, y):
 
-        # both in size [batch_size, 2*n]
+        # 观测差异：当前实际观测值 y 与预测观测值 y_previous 的差异
         obs_diff = y - self.y_previous
+
+        # 观测创新差异：当前实际观测值 y 与当前后验预测值 m1y 的差异
         obs_innov_diff = y - self.m1y
 
-        # both in size [batch_size, m]
-        # 前一时刻后验与当前后验的 相对四元数：状态更新差异
+        # 状态演化差异：上一时刻后验状态与当前后验状态之间的相对四元数
         fw_evol_diff = quaternion_difference(self.m1x_posterior, self.m1x_posterior_previous)
-        
-        # 前一时刻后验状态与当前预测值的 相对四元数：状态演化差异
+
+        # 状态更新差异：上一时刻后验状态与当前预测状态之间的相对四元数
         fw_update_diff = quaternion_difference(self.m1x_posterior, self.m1x_prior_previous)
 
+        # 对上述差异进行归一化处理，方便模型的数值稳定性
         obs_diff = func.normalize(obs_diff, p=2, dim=1, eps=1e-12, out=None)
         obs_innov_diff = func.normalize(obs_innov_diff, p=2, dim=1, eps=1e-12, out=None)
         fw_evol_diff = func.normalize(fw_evol_diff, p=2, dim=1, eps=1e-12, out=None)
         fw_update_diff = func.normalize(fw_update_diff, p=2, dim=1, eps=1e-12, out=None)
-                 
 
-        # Kalman Gain Network Step [1, batch_size, m*m]
+        # 使用卡尔曼增益网络计算卡尔曼增益
         KG = self.KGain_step(obs_diff, obs_innov_diff, fw_evol_diff, fw_update_diff)
 
-
-        # Reshape Kalman Gain to a Matrix [batch_size, 4, 6]
+        # 将卡尔曼增益重整为矩阵形式，方便后续计算
         self.KGain = torch.reshape(KG, (self.batch_size, self.m, 2 * self.n))
 
     #######################
@@ -263,31 +271,33 @@ class KalmanNetNN(torch.nn.Module):
     #######################
     def KNet_step(self, train_input_gyr, train_input_y):
 
-        # Compute Priors self.m1x_prior_previous self.y_previous [batch_size, n&m]
+        # 计算先验状态和观测的预测值
         self.step_prior(train_input_gyr)
 
-        # Compute Kalma n Gain 
-        self.step_KGain_est(train_input_y) 
+        # 计算卡尔曼增益
+        self.step_KGain_est(train_input_y)
 
-        # [batch_size, n] 预测测量值-预测值 角度
+        # 计算创新（预测观测值和实际观测值的角度差异）
         dy = train_input_y - self.y_previous
-        dy = dy.unsqueeze(2)
-        
+        dy = dy.unsqueeze(2)  # 调整形状以适配后续矩阵运算
+
+        # 对卡尔曼增益和创新向量进行数值裁剪，避免梯度爆炸
         self.KGain = torch.clamp(self.KGain, min=-1e6, max=1e6)
         dy = torch.clamp(dy, min=-1e6, max=1e6)
 
-        INOV = torch.bmm(self.KGain, dy) #[batch, 4, 1] 
-        
-        # 前一时刻后验 X(t-1|t-1)
-        self.m1x_posterior_previous = self.m1x_posterior #[batch, 4,]
+        # 计算状态更新的创新项
+        INOV = torch.bmm(self.KGain, dy)  # [batch, 4, 1]
 
-        # 后验更新
+        # 更新先前的后验状态
+        self.m1x_posterior_previous = self.m1x_posterior  # [batch, 4]
+
+        # 根据创新项更新后验状态
         self.m1x_posterior = self.m1x_prior_previous + INOV.squeeze(-1)
 
-        # update y_prev
+        # 更新观测的后验值
         self.m1y = train_input_y
 
-        # return
+        # 返回更新后的后验状态
         return self.m1x_posterior
 
     ########################
@@ -296,68 +306,69 @@ class KalmanNetNN(torch.nn.Module):
     def KGain_step(self, obs_diff, obs_innov_diff, fw_evol_diff, fw_update_diff):
 
         def expand_dim(x):
+            # 扩展输入维度，以满足后续操作要求
             expanded = torch.empty(self.seq_len_input, self.batch_size, x.shape[-1]).to(self.device)
             expanded[0, :, :] = x
             return expanded
 
+        # 扩展每种差异的维度
         obs_diff = expand_dim(obs_diff)
         obs_innov_diff = expand_dim(obs_innov_diff)
         fw_evol_diff = expand_dim(fw_evol_diff)
         fw_update_diff = expand_dim(fw_update_diff)
 
         ####################
-        ### Forward Flow ###
+        ### 正向流步骤 ###
         ####################
-        
-        # FC 5
-        in_FC5 = fw_update_diff 
-        out_FC5 = self.FC5(in_FC5) 
 
-        # Q-GRU
-        in_Q = out_FC5 
-        out_Q, self.h_Q = self.GRU_Q(in_Q, self.h_Q) 
+        # 全连接层 5：基于状态更新差异
+        in_FC5 = fw_update_diff
+        out_FC5 = self.FC5(in_FC5)
 
-        # FC 6
-        in_FC6 = fw_evol_diff 
-        out_FC6 = self.FC6(in_FC6) 
+        # Q-GRU：对状态更新差异进行时序建模
+        in_Q = out_FC5
+        out_Q, self.h_Q = self.GRU_Q(in_Q, self.h_Q)
 
-        # Sigma_GRU
+        # 全连接层 6：基于状态演化差异
+        in_FC6 = fw_evol_diff
+        out_FC6 = self.FC6(in_FC6)
+
+        # Sigma-GRU：结合状态更新和演化特征进行进一步时序建模
         in_Sigma = torch.cat((out_Q, out_FC6), 2)
         out_Sigma, self.h_Sigma = self.GRU_Sigma(in_Sigma, self.h_Sigma)
- 
-        # FC 1
+
+        # 全连接层 1：基于Sigma特征
         in_FC1 = out_Sigma
         out_FC1 = self.FC1(in_FC1)
 
-        # FC 7
+        # 全连接层 7：结合观测差异和创新差异
         in_FC7 = torch.cat((obs_diff, obs_innov_diff), 2)
         out_FC7 = self.FC7(in_FC7)
 
-
-        # S-GRU
+        # S-GRU：结合所有特征进行时序建模
         in_S = torch.cat((out_FC1, out_FC7), 2)
         out_S, self.h_S = self.GRU_S(in_S, self.h_S)
 
-
-        # FC 2
+        # 全连接层 2：生成更新后的特征
         in_FC2 = torch.cat((out_Sigma, out_S), 2)
-        out_FC2 = self.FC2(in_FC2) 
+        out_FC2 = self.FC2(in_FC2)
 
         #####################
-        ### Backward Flow ###
+        ### 反向流步骤 ###
         #####################
 
-        # FC 3
-        in_FC3 = torch.cat((out_S, out_FC2), 2) #([1, 56, 21])
-        out_FC3 = self.FC3(in_FC3) #([1, 56, 16])
+        # 全连接层 3：基于S特征和更新特征
+        in_FC3 = torch.cat((out_S, out_FC2), 2)
+        out_FC3 = self.FC3(in_FC3)
 
-        # FC 4
-        in_FC4 = torch.cat((out_Sigma, out_FC3), 2) #([1, 56, 32])
-        out_FC4 = self.FC4(in_FC4) #([1, 56, 16])
+        # 全连接层 4：基于Sigma特征和更新特征
+        in_FC4 = torch.cat((out_Sigma, out_FC3), 2)
+        out_FC4 = self.FC4(in_FC4)
 
-        # updating hidden state of the Sigma-GRU
-        self.h_Sigma = out_FC4 
+        # 更新Sigma-GRU的隐藏状态
+        self.h_Sigma = out_FC4
 
+        # 返回更新后的特征
         return out_FC2
     ###############
     ### Forward ###
